@@ -84,10 +84,15 @@ class AgendaRuntimeMixin:
     def _agenda_prepare_store(self) -> None:
         if not isinstance(getattr(self, "data", None), dict):
             self.data = {}
-        migrated, changed = migrate_store(self.data)
-        self.data = migrated
-        if changed:
-            self._agenda_migration_dirty = True
+        # Migration belongs to store activation, not every read or message.
+        # Retain the object rather than its id so replacements cannot reuse
+        # an old identity and accidentally skip their migration.
+        if getattr(self, "_agenda_prepared_data", None) is not self.data:
+            migrated, changed = migrate_store(self.data)
+            self.data = migrated
+            self._agenda_prepared_data = migrated
+            if changed:
+                self._agenda_migration_dirty = True
         if not isinstance(getattr(self, "_agenda_capture", None), ActivityCapture):
             self._agenda_capture = ActivityCapture()
         bot_id = str(
@@ -97,13 +102,20 @@ class AgendaRuntimeMixin:
         ).strip()
         timezone_name = self._agenda_timezone_name()
         policy = getattr(self, "_agenda_disclosure_policy", None)
-        if not isinstance(policy, AgendaDisclosurePolicy) or policy.bot_id != bot_id or policy.timezone_name != timezone_name:
-            self._agenda_disclosure_policy = AgendaDisclosurePolicy(bot_id=bot_id, timezone_name=timezone_name)
+        if (
+            not isinstance(policy, AgendaDisclosurePolicy)
+            or policy.bot_id != bot_id
+            or policy.timezone_name != timezone_name
+        ):
+            self._agenda_disclosure_policy = AgendaDisclosurePolicy(
+                bot_id=bot_id, timezone_name=timezone_name
+            )
         runtime_resolver = getattr(self, "_runtime_scene_resolver", None)
         if (
             not isinstance(runtime_resolver, RuntimeSceneResolver)
             or runtime_resolver.bot_id != bot_id
-            or getattr(runtime_resolver, "timezone_name", timezone_name) != timezone_name
+            or getattr(runtime_resolver, "timezone_name", timezone_name)
+            != timezone_name
         ):
             self._runtime_scene_resolver = RuntimeSceneResolver(
                 bot_id=bot_id,
@@ -541,7 +553,8 @@ class AgendaRuntimeMixin:
         for index, raw in enumerate(items):
             if not isinstance(raw, dict):
                 continue
-            item = deepcopy(raw)
+            # The normalizer owns the deep copy; only add scalar defaults here.
+            item = dict(raw)
             item.setdefault("date", plan_date)
             item.setdefault("subject_actor_id", getattr(getattr(self, "_agenda_disclosure_policy", None), "bot_id", "bot_self"))
             item.setdefault("actor_type", "bot")

@@ -457,8 +457,30 @@ def interval_overlaps_window(
 ) -> bool:
     """Return whether an item interval intersects ``[start, end)``."""
 
-    if not isinstance(item, dict):
+    item_start, item_end = item_interval(item, timezone_name=timezone_name)
+    if item_start is None or item_end is None:
         return False
+    start_local = parse_datetime(start, timezone_name=timezone_name)
+    end_local = parse_datetime(end, timezone_name=timezone_name)
+    return item_start < end_local and item_end > start_local
+
+
+def item_interval(
+    item: dict[str, Any],
+    *,
+    timezone_name: str = "Asia/Shanghai",
+) -> tuple[datetime | None, datetime | None]:
+    """Resolve an interval once for reuse across agenda window projections.
+
+    Args:
+        item: Canonical or legacy agenda record.
+        timezone_name: Timezone used for naive and clock-only values.
+
+    Returns:
+        Start and exclusive end, or two None values when no start is available.
+    """
+    if not isinstance(item, dict):
+        return None, None
     # Legacy daily-plan rows carry ``date`` plus bare ``time``/``end`` clocks.
     # Resolve them through the same helper used by temporal-phase derivation so
     # a 00:30 item remains attached to the preceding late-night window.
@@ -468,7 +490,7 @@ def interval_overlaps_window(
         timezone_name=timezone_name,
     )
     if item_start is None:
-        return False
+        return None, None
     item_end = _item_datetime(
         item,
         ("end_at", "end", "ends_at", "end_time"),
@@ -478,17 +500,19 @@ def interval_overlaps_window(
     if item_end is None:
         item_end = item_start
     if item_end <= item_start:
-        raw_start = _text(item.get("start_at") or item.get("start") or item.get("time"), 96)
-        raw_end = _text(item.get("end_at") or item.get("end") or item.get("end_time"), 96)
+        raw_start = _text(
+            item.get("start_at") or item.get("start") or item.get("time"), 96
+        )
+        raw_end = _text(
+            item.get("end_at") or item.get("end") or item.get("end_time"), 96
+        )
         start_clock = raw_start.rsplit("T", 1)[-1][:5] if ":" in raw_start else ""
         end_clock = raw_end.rsplit("T", 1)[-1][:5] if ":" in raw_end else ""
         if start_clock and end_clock and end_clock <= start_clock:
             item_end = item_end + timedelta(days=1)
         else:
             item_end = item_start + timedelta(seconds=1)
-    start_local = parse_datetime(start, timezone_name=timezone_name)
-    end_local = parse_datetime(end, timezone_name=timezone_name)
-    return item_start < end_local and item_end > start_local
+    return item_start, item_end
 
 
 def _item_datetime(

@@ -6515,12 +6515,21 @@ class PrivateCompanionPlugin(
         """Retry late memory binding until the scoped runtime becomes usable."""
         stop_event = getattr(self, "_stop_event", None)
         startup_tasks = getattr(self, "_startup_background_tasks", {})
-        migration_task = startup_tasks.get("req041_automatic_migration") if isinstance(startup_tasks, dict) else None
-        if isinstance(migration_task, asyncio.Task) and migration_task is not asyncio.current_task():
+        migration_task = (
+            startup_tasks.get("req041_automatic_migration")
+            if isinstance(startup_tasks, dict)
+            else None
+        )
+        if (
+            isinstance(migration_task, asyncio.Task)
+            and migration_task is not asyncio.current_task()
+        ):
             try:
                 await asyncio.shield(migration_task)
             except Exception:
                 pass
+        retry_delay = 2.0
+        last_error = ""
         while True:
             if isinstance(stop_event, asyncio.Event) and stop_event.is_set():
                 return
@@ -6533,17 +6542,46 @@ class PrivateCompanionPlugin(
                 continue
             try:
                 result = await self._req041_rebind_memory_scope_if_available()
-            except Exception as exc:
-                logger.warning(
-                    "[PrivateCompanion] 记忆作用域补绑定暂未完成，将重试: %s",
-                    _single_line(exc, 160),
-                    exc_info=True,
-                )
-                await asyncio.sleep(2.0)
+            except Exception as exc:  # noqa: BLE001 - optional bridges expose different exception types
+                error = _single_line(exc, 160)
+                # Integrity failures cannot heal by copying and replaying the
+                # same snapshot. Keep validation closed until repair/reload.
+                if str(exc).partition(":")[0] in {
+                    "private_memory_hash_mismatch",
+                    "private_memory_content_not_dict",
+                    "private_memory_revision_invalid",
+                    "private_memory_schema_mismatch",
+                    "private_memory_record_not_dict",
+                    "private_memory_store_invalid",
+                }:
+                    status.update(
+                        {
+                            "state": "degraded",
+                            "code": "private_memory_integrity_error",
+                            "memory_bound": False,
+                            "repair_required": True,
+                            "error": error,
+                        }
+                    )
+                    logger.warning(
+                        "[PrivateCompanion] Memory scope binding requires private memory repair before retry: %s",
+                        error,
+                    )
+                    return
+                if error != last_error:
+                    logger.warning(
+                        "[PrivateCompanion] Memory scope binding will retry after a transient failure: %s",
+                        error,
+                    )
+                    last_error = error
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60.0)
                 continue
             if result.get("ok"):
                 status = getattr(self, "req041_migration_status", None)
                 if isinstance(status, dict):
+                    if status.pop("repair_required", False):
+                        status.pop("error", None)
                     status.update({"memory_bound": True, "scoped": result})
                     paused = status.get("state") == "paused"
                     replay_ready = (
@@ -6553,13 +6591,18 @@ class PrivateCompanionPlugin(
                     if paused or not replay_ready:
                         return
                     if status.get("required"):
-                        status.update({"state": "active", "code": "migration_shadow_active"})
+                        status.update(
+                            {"state": "active", "code": "migration_shadow_active"}
+                        )
                     else:
-                        status.update({"state": "active", "code": "fresh_scoped_runtime_active"})
+                        status.update(
+                            {"state": "active", "code": "fresh_scoped_runtime_active"}
+                        )
                     return
                 elif status is None:
                     return
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60.0)
 
     async def _req041_run_scoped_sync(self) -> None:
         while bool(getattr(self, "_req041_scoped_sync_requested", False)):

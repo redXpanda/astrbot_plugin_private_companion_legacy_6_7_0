@@ -9,6 +9,7 @@ compatible observation can update the plan's C3 status.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from itertools import islice
 import re
 from typing import Any
 
@@ -593,37 +594,65 @@ def reconcile(
     entries: list[dict[str, Any]] = []
     matched: dict[str, list[str]] = {}
 
+    # Intervals and phases are stable for this reconciliation. Computing
+    # them inside every plan/activity comparison multiplies parsing costs.
+    activity_intervals = {
+        id(activity): _interval(activity, now) for activity in normalized_activities
+    }
+
     for plan in normalized_plans:
         plan_id = str(plan.get("plan_id") or stable_id("plan", plan.get("title")))
         plan_result = dict(plan)
         trace = list(plan_result.get("decision_trace") or [])
+        plan_start, plan_end = _interval(plan, now)
+        plan_phase = plan["temporal_phase"]
+        overlapping = {
+            activity_id
+            for activity_id, (start, end) in activity_intervals.items()
+            if plan_start
+            and plan_end
+            and start
+            and end
+            and plan_start < end
+            and start < plan_end
+        }
         explicit = [
             activity
             for activity in normalized_activities
-            if _same_source(plan, activity) and _actor_compatible(plan, activity)
-            and (_overlaps(plan, activity, now) or not _interval(plan, now)[0] or not _interval(activity, now)[0])
+            if _same_source(plan, activity)
+            and _actor_compatible(plan, activity)
+            and (
+                id(activity) in overlapping
+                or not plan_start
+                or not activity_intervals[id(activity)][0]
+            )
         ]
+        explicit_ids = {str(item.get("activity_id")) for item in explicit}
         executable = [
             activity
             for activity in explicit
-            if _temporal_phase(plan, now) != "future"
-            and _temporal_phase(activity, now) != "future"
+            if plan_phase != "future"
+            and activity["temporal_phase"] != "future"
             and str(activity.get("status") or "active").lower()
             in {"active", "completed", "partially_completed"}
             and _supports_execution(plan, activity, explicit_ref=True)
         ]
         # Similarity is useful for diagnostics, but it is never execution
         # evidence and must not consume an activity or alter status.
-        similar = [
-            activity
-            for activity in normalized_activities
-            if str(activity.get("activity_id")) not in {str(item.get("activity_id")) for item in explicit}
-            and _actor_compatible(plan, activity)
-            and _overlaps(plan, activity, now)
-            and _title_similarity(plan, activity) >= 0.18
-        ]
+        similar = list(
+            islice(
+                (
+                    activity
+                    for activity in normalized_activities
+                    if str(activity.get("activity_id")) not in explicit_ids
+                    and _actor_compatible(plan, activity)
+                    and id(activity) in overlapping
+                    and _title_similarity(plan, activity) >= 0.18
+                ),
+                3,
+            )
+        )
         if similar:
-            similar = similar[:3]
             reconciliation_candidates.append(
                 {
                     "candidate_id": stable_id(
@@ -635,37 +664,49 @@ def reconcile(
                     "activity_ids": [str(item.get("activity_id")) for item in similar],
                     "status": "pending_verification",
                     "source_kind": "reconciled",
-                    "temporal_phase": _temporal_phase(plan, now),
+                    "temporal_phase": plan_phase,
                     "evidence_kind": _evidence_kind(similar[0]),
                     "epistemic_status": "inferred",
                     "fact_eligibility": "none",
                     "subject_actor_id": plan.get("subject_actor_id", ""),
                     "reason": "time overlap/title similarity requires verification",
                     "decision_trace": [
-                        _trace_event("reconciler.similarity_candidate", "similarity is diagnostic only")
+                        _trace_event(
+                            "reconciler.similarity_candidate",
+                            "similarity is diagnostic only",
+                        )
                     ],
                 }
             )
             trace.append(
-                _trace_event("reconciler.similarity_withheld", "similarity candidate withheld from execution status")
+                _trace_event(
+                    "reconciler.similarity_withheld",
+                    "similarity candidate withheld from execution status",
+                )
             )
 
         # A sustained conversation can occupy a live plan window without
         # proving that the planned activity was completed. Keep this as a
         # diagnostic-only interruption hint so prompt consumers may gently
         # acknowledge it without turning chat into execution evidence.
-        interruptions = [
-            activity
-            for activity in normalized_activities
-            if str(activity.get("activity_id")) not in {str(item.get("activity_id")) for item in explicit}
-            and _actor_compatible(plan, activity)
-            and _temporal_phase(plan, now) == "current"
-            and _evidence_kind(activity) in CHAT_EVIDENCE_KINDS
-            and _overlaps(plan, activity, now)
-            and not _is_chat_plan(plan)
-        ]
+        interruptions = (
+            list(
+                islice(
+                    (
+                        activity
+                        for activity in normalized_activities
+                        if str(activity.get("activity_id")) not in explicit_ids
+                        and _actor_compatible(plan, activity)
+                        and _evidence_kind(activity) in CHAT_EVIDENCE_KINDS
+                        and id(activity) in overlapping
+                    ),
+                    3,
+                )
+            )
+            if plan_phase == "current" and not _is_chat_plan(plan)
+            else []
+        )
         if interruptions:
-            interruptions = interruptions[:3]
             interruption_ids = [str(item.get("activity_id")) for item in interruptions]
             reconciliation_candidates.append(
                 {
@@ -675,7 +716,9 @@ def reconcile(
                         interruption_ids,
                     ),
                     "plan_id": plan_id,
-                    "plan_title": str(plan.get("title") or plan.get("activity") or "当前计划")[:120],
+                    "plan_title": str(
+                        plan.get("title") or plan.get("activity") or "当前计划"
+                    )[:120],
                     "activity_ids": interruption_ids,
                     "activity_summary": str(
                         interruptions[-1].get("title")

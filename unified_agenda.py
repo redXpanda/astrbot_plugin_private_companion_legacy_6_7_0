@@ -13,7 +13,7 @@ from typing import Any
 try:
     from .agenda_contracts import (
         SCHEDULE_WINDOWS,
-        interval_overlaps_window,
+        item_interval,
         parse_datetime,
         window_bounds,
         window_for_datetime,
@@ -22,7 +22,7 @@ try:
 except ImportError:
     from agenda_contracts import (
         SCHEDULE_WINDOWS,
-        interval_overlaps_window,
+        item_interval,
         parse_datetime,
         window_bounds,
         window_for_datetime,
@@ -114,7 +114,13 @@ def _is_commitment(item: dict[str, Any]) -> bool:
     )
 
 
-def _item_for_date(item: dict[str, Any], target_date: str, *, timezone_name: str) -> bool:
+def _item_for_date(
+    item: dict[str, Any],
+    target_date: str,
+    *,
+    timezone_name: str,
+    bounds: list[tuple[datetime, datetime]] | None = None,
+) -> bool:
     if not target_date:
         return True
     explicit_date = str(item.get("date") or item.get("window_date") or "")[:10]
@@ -123,12 +129,20 @@ def _item_for_date(item: dict[str, Any], target_date: str, *, timezone_name: str
     # A late-night window is keyed by its starting date but extends into the
     # next calendar day.  Checking all canonical windows handles that case and
     # avoids dropping 00:30 entries from a requested prior-day agenda.
-    for slug, _name, _start_minute, _end_minute in SCHEDULE_WINDOWS:
-        try:
-            start, end = window_bounds(target_date, slug, timezone_name=timezone_name)
-        except Exception:
-            continue
-        if interval_overlaps_window(item, start, end, timezone_name=timezone_name):
+    item_start, item_end = item_interval(item, timezone_name=timezone_name)
+    if item_start is None or item_end is None:
+        return False
+    if bounds is None:
+        bounds = []
+        for slug, _name, _start_minute, _end_minute in SCHEDULE_WINDOWS:
+            try:
+                bounds.append(
+                    window_bounds(target_date, slug, timezone_name=timezone_name)
+                )
+            except Exception:
+                continue
+    for start, end in bounds:
+        if item_start < end and item_end > start:
             return True
     return False
 
@@ -139,7 +153,9 @@ def _dedupe_entries(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for item in items:
         if not isinstance(item, dict):
             continue
-        key = str(item.get("entry_id") or item.get("plan_id") or item.get("activity_id") or "")
+        key = str(
+            item.get("entry_id") or item.get("plan_id") or item.get("activity_id") or ""
+        )
         if key and key in seen:
             continue
         if key:
@@ -149,7 +165,9 @@ def _dedupe_entries(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _entry_key(item: dict[str, Any]) -> str:
-    return str(item.get("entry_id") or item.get("plan_id") or item.get("activity_id") or "")
+    return str(
+        item.get("entry_id") or item.get("plan_id") or item.get("activity_id") or ""
+    )
 
 
 def build_unified_agenda(
@@ -161,54 +179,89 @@ def build_unified_agenda(
     timezone_name: str = "Asia/Shanghai",
 ) -> dict[str, Any]:
     result = reconcile(plans or [], activities or [], now=now)
-    current_slug, current_window_date, _current_start, _current_end = window_for_datetime(
-        now,
-        timezone_name=timezone_name,
+    current_slug, current_window_date, _current_start, _current_end = (
+        window_for_datetime(
+            now,
+            timezone_name=timezone_name,
+        )
     )
     target_date = str(date_key or current_window_date)[:10]
+    bounds = [
+        window_bounds(target_date, slug, timezone_name=timezone_name)
+        for slug, _name, _start_minute, _end_minute in SCHEDULE_WINDOWS
+    ]
 
-    all_entries = [item for item in result["entries"] if _item_for_date(item, target_date, timezone_name=timezone_name)]
-    current_facts = [_fact_projection(item) for item in all_entries if _is_current_fact(item, now)]
-    history_facts = [_fact_projection(item) for item in all_entries if _is_history_fact(item, now)]
+    all_entries = [
+        item
+        for item in result["entries"]
+        if _item_for_date(item, target_date, timezone_name=timezone_name, bounds=bounds)
+    ]
+    current_facts = [
+        _fact_projection(item) for item in all_entries if _is_current_fact(item, now)
+    ]
+    history_facts = [
+        _fact_projection(item) for item in all_entries if _is_history_fact(item, now)
+    ]
     future_raw = [item for item in all_entries if _is_future_schedule(item, now)]
     future_schedule = [_future_projection(item) for item in future_raw]
-    current_ids = {
-        _entry_key(item)
-        for item in current_facts
-    }
-    history_ids = {
-        _entry_key(item)
-        for item in history_facts
-    }
-    future_ids = {
-        _entry_key(item)
-        for item in future_raw
-    }
+    current_ids = {_entry_key(item) for item in current_facts}
+    history_ids = {_entry_key(item) for item in history_facts}
+    future_ids = {_entry_key(item) for item in future_raw}
     schedule_commitments = [item for item in future_schedule if _is_commitment(item)]
     # ``memory_write`` is intentionally narrower than the complete agenda:
     # projections, plans, and unresolved candidates cannot become history.
-    memory_write = [item for item in history_facts if item.get("fact_eligibility") in _HISTORY_FACT_ELIGIBILITY]
+    memory_write = [
+        item
+        for item in history_facts
+        if item.get("fact_eligibility") in _HISTORY_FACT_ELIGIBILITY
+    ]
     current = None
-    for item in sorted(current_facts, key=lambda value: str(value.get("start_at") or "")):
-        if str(item.get("status") or "").lower() in {"cancelled", "unknown", "deferred", "overridden"}:
+    for item in sorted(
+        current_facts, key=lambda value: str(value.get("start_at") or "")
+    ):
+        if str(item.get("status") or "").lower() in {
+            "cancelled",
+            "unknown",
+            "deferred",
+            "overridden",
+        }:
             continue
         current = item
         break
 
     windows: list[dict[str, Any]] = []
-    for slug, _name, _start_minute, _end_minute in SCHEDULE_WINDOWS:
-        start, end = window_bounds(target_date, slug, timezone_name=timezone_name)
+    plan_intervals = [
+        (item, *item_interval(item, timezone_name=timezone_name))
+        for item in result["plans"]
+    ]
+    activity_intervals = [
+        (item, *item_interval(item, timezone_name=timezone_name))
+        for item in result["activities"]
+    ]
+    for (slug, _name, _start_minute, _end_minute), (start, end) in zip(
+        SCHEDULE_WINDOWS, bounds
+    ):
         window_plans = [
-            item for item in result["plans"] if interval_overlaps_window(item, start, end, timezone_name=timezone_name)
+            item
+            for item, item_start, item_end in plan_intervals
+            if item_start is not None
+            and item_end is not None
+            and item_start < end
+            and item_end > start
         ]
         window_activities = [
             item
-            for item in result["activities"]
-            if interval_overlaps_window(item, start, end, timezone_name=timezone_name)
+            for item, item_start, item_end in activity_intervals
+            if item_start is not None
+            and item_end is not None
+            and item_start < end
+            and item_end > start
         ]
         plan_ids = {str(item.get("plan_id")) for item in window_plans}
         window_reconciliations = [
-            item for item in result["reconciliations"] if str(item.get("plan_id")) in plan_ids
+            item
+            for item in result["reconciliations"]
+            if str(item.get("plan_id")) in plan_ids
         ]
         windows.append(
             {
@@ -220,14 +273,26 @@ def build_unified_agenda(
                 "planned": window_plans,
                 "observed": window_activities,
                 "reconciled": window_reconciliations,
-                "current_fact": [_fact_projection(item) for item in window_activities if _is_current_fact(item, now)],
-                "history_fact": [_fact_projection(item) for item in window_activities if _is_history_fact(item, now)],
+                "current_fact": [
+                    _fact_projection(item)
+                    for item in window_activities
+                    if _is_current_fact(item, now)
+                ],
+                "history_fact": [
+                    _fact_projection(item)
+                    for item in window_activities
+                    if _is_history_fact(item, now)
+                ],
                 "future_schedule": [
                     _future_projection(item)
                     for item in window_plans
                     if _is_future_schedule(item, now)
                 ],
-                "schedule_commitment": [_future_projection(item) for item in window_plans if _is_commitment(item)],
+                "schedule_commitment": [
+                    _future_projection(item)
+                    for item in window_plans
+                    if _is_commitment(item)
+                ],
             }
         )
 

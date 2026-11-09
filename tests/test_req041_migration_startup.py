@@ -12,6 +12,7 @@ import sqlite3
 import tempfile
 import types
 import unittest
+from unittest.mock import AsyncMock, Mock, patch
 from typing import Any
 
 from migration_coordinator import MigrationCoordinator
@@ -21,7 +22,7 @@ from migration_outbox import MigrationOutbox
 from migration_replay import MigrationReplayWorker
 from migration_read_router import MigrationRelationshipReadRouter
 from migration_source_inspector import inspect_migration_sources
-from migration_scoped_projection import ScopedProjectionSynchronizer
+from migration_scoped_projection import ScopedProjectionError, ScopedProjectionSynchronizer
 from migration_scoped_projection import scoped_group_ref, scoped_persona_ref
 from relationship_account_store import RelationshipAccountStore
 from identity_namespace import AssurancePolicy, NamespaceContext
@@ -259,7 +260,67 @@ class MigrationStartupTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(original_bridge, host._req041_scoped_bridge)
         self.assertEqual(2, len(host.bind_calls))
 
-    async def test_new_install_first_exact_identity_reaches_new_read_through_outbox(self) -> None:
+    async def test_rebind_stops_on_corrupt_private_memory_without_rewriting_it(
+        self,
+    ) -> None:
+        host = self._host(source=False)
+        host._memory_companion_bridge_enabled = lambda: True
+        host.req041_migration_status = {"state": "degraded"}
+        before = deepcopy(host.data)
+        host._req041_rebind_memory_scope_if_available = AsyncMock(
+            side_effect=ScopedProjectionError(
+                "private_memory_hash_mismatch: revision=23"
+            )
+        )
+        namespace = METHODS["_req041_run_memory_scope_rebind"].__globals__
+        logger = Mock()
+        with (
+            patch.dict(namespace, {"logger": logger}),
+            patch.object(asyncio, "sleep", new_callable=AsyncMock) as sleep,
+        ):
+            await host._req041_run_memory_scope_rebind()
+        host._req041_rebind_memory_scope_if_available.assert_awaited_once()
+        sleep.assert_not_awaited()
+        self.assertEqual(before, host.data)
+        self.assertTrue(host.req041_migration_status["repair_required"])
+        self.assertFalse(host.req041_migration_status["memory_bound"])
+        self.assertEqual(
+            "private_memory_integrity_error", host.req041_migration_status["code"]
+        )
+        logger.warning.assert_called_once()
+        self.assertNotIn("exc_info", logger.warning.call_args.kwargs)
+
+        host._req041_rebind_memory_scope_if_available = AsyncMock(return_value={"ok": True})
+        await host._req041_run_memory_scope_rebind()
+        self.assertTrue(host.req041_migration_status["memory_bound"])
+        self.assertNotIn("repair_required", host.req041_migration_status)
+        self.assertNotIn("error", host.req041_migration_status)
+
+    async def test_rebind_backs_off_and_recovers_from_transient_errors(self) -> None:
+        host = self._host(source=False)
+        host._memory_companion_bridge_enabled = lambda: True
+        host.req041_migration_status = {"state": "degraded"}
+        host._req041_rebind_memory_scope_if_available = AsyncMock(
+            side_effect=[
+                RuntimeError("temporary bridge failure"),
+                RuntimeError("temporary bridge failure"),
+                {"ok": True},
+            ]
+        )
+        namespace = METHODS["_req041_run_memory_scope_rebind"].__globals__
+        logger = Mock()
+        with (
+            patch.dict(namespace, {"logger": logger}),
+            patch.object(asyncio, "sleep", new_callable=AsyncMock) as sleep,
+        ):
+            await host._req041_run_memory_scope_rebind()
+        self.assertEqual([2.0, 4.0], [call.args[0] for call in sleep.await_args_list])
+        logger.warning.assert_called_once()
+        self.assertTrue(host.req041_migration_status["memory_bound"])
+
+    async def test_new_install_first_exact_identity_reaches_new_read_through_outbox(
+        self,
+    ) -> None:
         host = self._host(source=False)
         await host._req041_initialize_automatic_migration()
         registry = UnifiedPersonRegistry(host.data)
