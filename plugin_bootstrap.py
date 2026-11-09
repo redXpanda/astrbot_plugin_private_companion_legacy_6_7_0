@@ -1734,6 +1734,12 @@ def _initialize_review_and_group_config(self: Any, c: Any) -> None:
     self.enable_emotion_simulation = self._cfg_bool(c, "enable_emotion_simulation", True)
     self.enable_relationship_violation_penalties = self._cfg_bool(c, "enable_relationship_violation_penalties", True)
     self.enable_relationship_boundary_feedback = self._cfg_bool(c, "enable_relationship_boundary_feedback", True)
+    self.enable_relationship_harassment_regex = self._cfg_bool(c, "enable_relationship_harassment_regex", False)
+    self.relationship_harassment_regex = self._cfg_str(
+        c,
+        "relationship_harassment_regex",
+        r"(脱(?:衣服)?给我看|发(?:裸照|私密照|黄图)|看(?:胸|腿|内衣)|开房|一夜情|做爱|上床)",
+    )
     self.enable_relationship_boundary_stage = self._cfg_bool(c, "enable_relationship_boundary_stage", True)
     self.enable_relationship_boundary_apology = self._cfg_bool(c, "enable_relationship_boundary_apology", True)
     self.enable_relationship_boundary_bottom_line = self._cfg_bool(c, "enable_relationship_boundary_bottom_line", True)

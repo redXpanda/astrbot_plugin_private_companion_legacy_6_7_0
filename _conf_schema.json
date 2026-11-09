@@ -13233,6 +13233,20 @@
           "enable_relationship_violation_penalties": true
         }
       },
+      "enable_relationship_harassment_regex": {
+        "description": "启用露骨要求关键词正则识别",
+        "type": "bool",
+        "hint": "默认关闭。开启后使用下方正则识别露骨要求，并交给关系边界判断。关键词不能理解完整语境，例如“上床休息”也可能命中“上床”；请按需要收窄规则。此开关只控制露骨要求关键词识别。",
+        "default": false,
+        "condition": {"enable_relationship_boundary_feedback": true}
+      },
+      "relationship_harassment_regex": {
+        "description": "露骨要求关键词正则表达式",
+        "type": "text",
+        "hint": "使用 Python re.search 正则语法，不要添加 / 分隔符。留空则不匹配；表达式无效时跳过该识别并记录警告。仅在上方开关开启时生效。",
+        "default": "(脱(?:衣服)?给我看|发(?:裸照|私密照|黄图)|看(?:胸|腿|内衣)|开房|一夜情|做爱|上床)",
+        "condition": {"enable_relationship_harassment_regex": true}
+      },
       "enable_relationship_boundary_stage": {
         "description": "启用越界阶段推进",
         "type": "bool",

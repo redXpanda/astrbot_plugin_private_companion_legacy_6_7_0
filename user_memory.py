@@ -5944,12 +5944,14 @@ class UserMemoryMixin:
                 cleaned,
             )
         )
-        explicit_harassment = bool(
-            re.search(
-                r"(脱(?:衣服)?给我看|发(?:裸照|私密照|黄图)|看(?:胸|腿|内衣)|开房|一夜情|做爱|上床)",
-                cleaned,
-            )
-        )
+        explicit_harassment = False
+        if bool(runtime_persona_setting(self, "enable_relationship_harassment_regex", False)):
+            pattern = str(runtime_persona_setting(self, "relationship_harassment_regex", "") or "").strip()
+            if pattern:
+                try:
+                    explicit_harassment = bool(re.search(pattern, cleaned))
+                except re.error as exc:
+                    logger.warning("Invalid relationship harassment regex; skipping keyword detection: %s", exc)
         if explicit_coercion or explicit_harassment:
             return {
                 "type": "action",
