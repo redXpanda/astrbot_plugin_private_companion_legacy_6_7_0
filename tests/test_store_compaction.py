@@ -8,6 +8,9 @@ from copy import deepcopy
 from unittest.mock import patch
 
 from astrbot_plugin_private_companion import core_store
+from astrbot_plugin_private_companion.authoritative_private_memory import (
+    AuthoritativePrivateMemoryStore,
+)
 from astrbot_plugin_private_companion.core_store import CoreStoreMixin
 
 
@@ -102,6 +105,30 @@ class StoreCompactionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(data["groups"]["10001"]["recent_messages"][0]["text"], raw)
         self.assertEqual(data["groups"]["10001"]["members"]["20002"]["recent_phrases"][0], raw)
+
+    def test_store_sanitization_preserves_hash_verified_private_memory(self) -> None:
+        data = {"memory": {"text": "Hello ， world"}}
+        store = AuthoritativePrivateMemoryStore(data)
+        created = store.commit(
+            "person-a",
+            {
+                "behavior_habits": {"patterns": [{"last_seen_text": "Hello ， world"}]},
+                "companion_memory": {"items": [{"text": "Two  spaces <bubble/>"}]},
+            },
+            expected_revision=0,
+            operation_id="create-a",
+        )
+        committed = deepcopy(data["_req041_private_memory"])
+        sanitizer = _ControlTagSanitizerHarness(True)
+
+        changed = sanitizer._sanitize_store_control_tags_inplace(data)
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(data["memory"]["text"], "Hello， world")
+        self.assertEqual(data["_req041_private_memory"], committed)
+        reopened = AuthoritativePrivateMemoryStore(data)
+        self.assertEqual(reopened.read("person-a")["record"], created["record"])
+        self.assertEqual(sanitizer._sanitize_store_control_tags_inplace(data), 0)
 
     async def test_snapshot_cleanup_updates_live_data_without_full_followup_write(self) -> None:
         harness = _CanonicalSanitizeHarness({"memory": {"text": "残留 <bubble/> 内容"}})

@@ -1582,6 +1582,9 @@ class CoreStoreMixin:
         """Remove leaked pseudo-control tags from persisted companion data."""
         if not bool(getattr(self, "enable_store_control_tag_sanitization", True)):
             return 0
+        if _path and _path[-1] == "_req041_private_memory":
+            # Committed memory must retain the exact content covered by its hash.
+            return 0
         changed = 0
         if isinstance(value, dict):
             for key, item in list(value.items()):
