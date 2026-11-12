@@ -5103,36 +5103,47 @@ class GroupObservationMixin:
         if not _persona_value(self, "enable_group_slang_meanings", False):
             return
         now = _now_ts()
-        async with self._data_lock:
-            group = deepcopy(self._get_group(group_id))
         slang_summary_minutes = _safe_float(_persona_value(self, "group_slang_summary_minutes", 360), 360, 0)
-        if now - _safe_float(group.get("last_slang_summary_at"), 0) < slang_summary_minutes * 60:
-            return
-        if now < _safe_float(group.get("group_slang_retry_after"), 0):
-            return
-        slang = group.get("slang_terms")
-        if not isinstance(slang, list):
-            return
-        if self._cleanup_group_slang_terms(group):
-            slang = group.get("slang_terms")
+        async with self._data_lock:
+            current = self._get_group(group_id)
+            if now - _safe_float(current.get("last_slang_summary_at"), 0) < slang_summary_minutes * 60:
+                return
+            if now < _safe_float(current.get("group_slang_retry_after"), 0):
+                return
+            slang = current.get("slang_terms")
             if not isinstance(slang, list):
                 return
-        slang = [item for item in slang if self._group_slang_term_is_promoted(group, item)]
-        if len(slang) < 3:
-            return
-        recent = self._filtered_group_recent_messages(group)
-        terms = [
-            _single_line(item.get("term"), 20)
-            for item in slang[:20]
-            if isinstance(item, dict) and _single_line(item.get("term"), 20)
-        ]
-        examples = []
-        for item in recent[-80:]:
-            if not isinstance(item, dict):
-                continue
-            text = _single_line(item.get("text"), 100)
-            if any(term and term in text for term in terms[:12]):
-                examples.append(f"{_single_line(item.get('name'), 18) or '群友'}: {text}")
+            # Cleanup replaces the term list and removes meaning keys only.
+            # Keep those containers private; member/message records are read under the lock.
+            meanings = current.get("slang_meanings")
+            group = {
+                "slang_terms": slang,
+                "slang_meanings": dict(meanings) if isinstance(meanings, dict) else meanings,
+                "members": current.get("members"),
+            }
+            self._cleanup_group_slang_terms(group)
+            slang = [item for item in group["slang_terms"] if self._group_slang_term_is_promoted(group, item)]
+            if len(slang) < 3:
+                return
+            terms = [
+                _single_line(item.get("term"), 20)
+                for item in slang[:20]
+                if isinstance(item, dict) and _single_line(item.get("term"), 20)
+            ]
+            recent = current.get("recent_messages")
+            examples = []
+            accepted = 0
+            # Preserve the last 80 eligible messages, including when newer ones are blocked.
+            for item in reversed(recent if isinstance(recent, list) else []):
+                if not isinstance(item, dict) or self._group_message_blocked_by_injection_guard(item):
+                    continue
+                accepted += 1
+                text = _single_line(item.get("text"), 100)
+                if any(term and term in text for term in terms[:12]):
+                    examples.append(f"{_single_line(item.get('name'), 18) or '群友'}: {text}")
+                if accepted >= 80:
+                    break
+            examples.reverse()
         if not examples:
             return
         acquired = await self._try_acquire_group_background_task(
